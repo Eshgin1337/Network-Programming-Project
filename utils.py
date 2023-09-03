@@ -3,7 +3,7 @@ import abc
 UDP_MAX_SIZE = 10000
 COMMANDS = ('connect:', 'disconnect:', 'end_session:', 'help:',)
 HELP_TEXT = """
-connect: <client_id> - connect to member
+connect: <client_username> - connect to member
 disconnect: to disconnect from member
 end_session: - disconnect from server
 help: - show this message

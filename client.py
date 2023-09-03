@@ -1,5 +1,6 @@
 import socket
 import threading
+import jwt
 import random
 import pickle
 import pymongo
@@ -7,8 +8,9 @@ import requests
 import werkzeug.security as ws
 from utils import *
 import ast
-
-
+from functools import wraps
+from flask import request,jsonify
+import datetime
 host = "127.0.0.1"
 port = 5555
 current_user = ""
@@ -19,29 +21,54 @@ already_printed_users = []
 myclient = pymongo.MongoClient("mongodb://localhost:27017/")
 mydb = myclient["usersDB"]
 users_schema = mydb["users"]
+
+messagesdb = myclient["messagesDB"]
+messages_schema = messagesdb["messages"]
+
 authenticated = False
+status=""
+
+connect_with_peer = False
+SECRET_KEY = "SECRET_KEY"
+
+def token_checker(token):
+ 
+       if not token:
+           print('a valid token is missing')
+           return False
+       try:
+           data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+           all_users = requests.get("http://127.0.0.1:5000/client").json()
+           current_user = ""
+           for user in all_users:
+               if user['username']==data['username']:
+                    current_user = user
+                    break
+
+       except:
+           print('token is invalid')
+           return False
+       print('token is valid')
+       return True
 
 while not authenticated:
     all_users = requests.get("http://127.0.0.1:5000/client").json()
 
-    prompt = input("Login or Signup?\n>>> ")
+    prompt = input("Login or Signup?")
 
     if prompt.lower() == "signup":
         username = input("Your username: ")
-        user_exists = False
         for i in all_users:
             if username == i["username"]:
                 print("This user already exists!")
-                user_exists = True
-                break
-        if user_exists:
-            continue
+                continue
+
         password = input("Your password: ")
         confirmation_password = input("Your confirmation password: ")
         if password == confirmation_password:
             personal_port = random.randint(40000, 60000)
-            requests.post(f"http://127.0.0.1:5000/client/{username}/{password}/{personal_port}")
-            print("\n\t\n\tYou are successfully signed up!. Please log in!\n\n")
+            status="offine"
+            requests.post(f"http://127.0.0.1:5000/client/{username}/{password}/{personal_port}/{status}")
             continue
         else:
             print("Confirmation password does not match, try again!")
@@ -59,11 +86,19 @@ while not authenticated:
         if match:
             for user in all_users:
                 if user["username"] == username and user["password"] == password:
+                    token = jwt.encode({"username": user["username"], "password": user["password"], "personal_port": user["personal_port"], "status": user["status"]}, SECRET_KEY, "HS256") 
+                    token_check = token_checker(token=token)
+                    if token_check == False:
+                        print('token check didnt pass\ncannot confirm authentication.')
+                        break
+
                     success = True
+                    status="online"
                     current_user = username
                     current_user_own_port = user["personal_port"]
+                    requests.put(f"http://127.0.0.1:5000/client/{username}/{password}/{current_user_own_port}/{status}")
                     authenticated = True
-                    break
+
 
             if not success:
                 print("Incorrect username or password. Please try again!")
@@ -112,12 +147,14 @@ def listen(s, host, port):
                             continue
                         else:
                             global n
-                            print('\r\r' + f'{n}) username: {member["username"]}' + f' personal_port: {member["personal_port"]}')
+                            print('\r\r' + f'{n}) username: {member["username"]}' + f' personal_port: {member["personal_port"]} status: {member["status"]}')
                             already_printed_users.append(member["username"])
                             n += 1
             n=1
 
         else:
+            global connect_with_peer
+            connect_with_peer = True
             peer_name = f'{username}'
             print('\r\r' + f'{peer_name}: ' + payload + '\n' + f'>>> ', end='')
 
@@ -127,8 +164,9 @@ def listen_thr(target, socket, host, port):
     th.start()
     return th
 
-
+# @token_required
 def connect(host, port, personal_port):
+    print('Welcome to chat!\nTo see the command type help: in a chat.')
     own_port = int(personal_port)
     print(f'Your personal port is: {own_port}')
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -143,42 +181,82 @@ def connect(host, port, personal_port):
     connect_with = False
 
     while True:
-        msg = input(f'>>> ')
-        command = msg.split(' ')[0]
-        if command in COMMANDS:
-
-            if msg.startswith('disconnect:'):
-                peer_port = sendto[-1]
-                allowed_ports.remove(peer_port)
-                sendto = (host, port)
-                print(f'Disconnect from client{peer_port}')
-                connect_with = False
-                continue
-            if msg == 'end_session:':
-                peer_port = sendto[-1]
-                allowed_ports.remove(peer_port)
-                sendto = (host, port)
-                print(f'Disconnect from client{peer_port}')
-                connect_with = False
-                print(f'you successfully disconnected from the chat!')
-                s.sendto(pickle.dumps(Message(username="", payload='end_session:', client_id=f"{own_port}",
-                                              hashed_message=ws.generate_password_hash('end_session:', 'md5'))), sendto)
-                quit()
-            if msg.startswith('connect:'):
-                connect_with = True
-                peer = msg.split(' ')[-1]
-                peer_port = int(peer) # peer_port = int(peer.replace('client', ''))
-                allowed_ports.append(peer_port)
-                sendto = (host, peer_port)
-                print(f'Connected to client{peer_port}')
-            if msg == 'help:':
-                print(HELP_TEXT)
-        else:
+        try:
+            global connect_with_peer
             if connect_with == True:
-                s.sendto(pickle.dumps((Message(username=username, payload=msg, client_id=f"{own_port}",
-                                               hashed_message=ws.generate_password_hash(msg, 'md5')))), sendto)
+                all_messages = requests.get("http://127.0.0.1:5000/message").json()
+                for i in all_messages:
+                    if i["to_username"] == username and connect_with_peer==False:
+                        # print(connect_with_peer)
+                        print(i["from_username"],":",i["msg"])
+                        requests.delete(f"http://127.0.0.1:5000/message/{i['from_username']}/{username}/{i['msg']}")
+                    if i["to_username"] == username and connect_with_peer==True:
+                        requests.delete(f"http://127.0.0.1:5000/message/{i['from_username']}/{username}/{i['msg']}")
+            msg = input(f'>>> ')
+            command = msg.split(' ')[0]
+            if command in COMMANDS:
 
-
+                if msg.startswith('disconnect:'):
+                    peer_port = sendto[-1]
+                    allowed_ports.remove(peer_port)
+                    sendto = (host, port)
+                    print(f'Successfully disconnected!')
+                    connect_with = False
+                    
+                    connect_with_peer = False
+                    continue
+                if msg == 'end_session:':
+                    peer_port = sendto[-1]
+                    allowed_ports.remove(peer_port)
+                    sendto = (host, port)
+                    print(f'Disconnect from client{peer_port}')
+                    connect_with = False
+                    print(f'you successfully disconnected from the chat!')
+                    s.sendto(pickle.dumps(Message(username="", payload='end_session:', client_id=f"{own_port}",
+                                                hashed_message=ws.generate_password_hash('end_session:', 'md5'))), sendto)
+                    quit()
+                if msg.startswith('connect:'):
+                    connect_with = True
+                    peername = msg.split(' ')[-1]
+                    all_users = requests.get("http://127.0.0.1:5000/client").json()
+                    peer=0
+                    falserequest = True
+                    for user in all_users:
+                        if user['username'] == peername:
+                            peer = user['personal_port']
+                            falserequest=False
+                    if falserequest == True:
+                        print("such user doesnt exist")
+                        continue
+                    # print(msg)
+                    peer_port = int(peer) # peer_port = int(peer.replace('client', ''))
+                    allowed_ports.append(peer_port)
+                    sendto = (host, peer_port)
+                    print(f'Connect to {peername}')
+                if msg == 'help:':
+                    print(HELP_TEXT)
+            else:
+                if connect_with == True:
+                    from_username = username
+                    to_username=""
+                    all_users = requests.get("http://127.0.0.1:5000/client").json()
+                    for user in all_users:
+                        if int(user["personal_port"]) == sendto[1] and connect_with_peer==False:
+                            to_username = user["username"]
+                            requests.post(f"http://127.0.0.1:5000/message/{from_username}/{to_username}/{msg}")
+                    s.sendto(pickle.dumps((Message(username=username, payload=msg, client_id=f"{own_port}",
+                                                hashed_message=ws.generate_password_hash(msg, 'md5')))), sendto)
+        except:
+            peer_port = sendto[-1]
+            allowed_ports.remove(peer_port)
+            sendto = (host, port)
+            print(f'Disconnect from client{peer_port}')
+            connect_with = False
+            print(f'you successfully disconnected from the chat!')
+            s.sendto(pickle.dumps(Message(username="", payload='end_session:', client_id=f"{own_port}",
+                                                hashed_message=ws.generate_password_hash('end_session:', 'md5'))), sendto)
+            status="offline"
+            requests.put(f"http://127.0.0.1:5000/client/{username}/{password}/{current_user_own_port}/{status}")
+            quit()
 if __name__ == '__main__':
-    print('Welcome to chat!\nTo see the command type help: in a chat.')
     connect(host, port, current_user_own_port)
